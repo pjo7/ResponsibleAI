@@ -33,13 +33,11 @@ discrete_actions = {
     0: [-1, 1], 1: [0, 1], 2: [1, 1], 3: [0, 0],
 }
 
-
 class CarlaRouteEnv(gym.Env):
     metadata = {
         "render.modes": ["human", "rgb_array", "rgb_array_no_hud", "state_pixels"]
     }
 
-    
     def __init__(self, host="127.0.0.1", port=2000,
                  viewer_res=(1120, 560), obs_res=(160, 80),
                  reward_fn=None,
@@ -51,7 +49,6 @@ class CarlaRouteEnv(gym.Env):
                  start_carla=True,
                  eval=False,
                  activate_render=True):
-       
 
         self.carla_process = None
         if start_carla:
@@ -79,7 +76,6 @@ class CarlaRouteEnv(gym.Env):
         else:
             out_width, out_height = obs_res
         self.activate_render = activate_render
-
 
         # Setup gym environment
         self.action_space_type = action_space_type
@@ -116,17 +112,16 @@ class CarlaRouteEnv(gym.Env):
             settings.synchronous_mode = True
             self.world.apply_settings(settings)
             self.client.reload_world(False)  # reload map keeping the world settings
-            
+
             # Create vehicle and attach camera to it
             self.vehicle = Vehicle(self.world, self.world.map.get_spawn_points()[0],
                                    on_collision_fn=lambda e: self._on_collision(e),
                                    on_invasion_fn=lambda e: self._on_invasion(e))
 
-            self.traffic_manager = self.client.get_trafficmanager(8000)
+            #self.traffic_manager = self.client.get_trafficmanager(8000)  # Remove traffic manager
 
             # Generate traffic before starting the environment
-            self.vehicles, self.walkers = generate_traffic(self.client, self.world, self.traffic_manager, num_vehicles=50, num_walkers=20)
-
+            #self.vehicles, self.walkers = generate_traffic(self.client, self.world, self.traffic_manager, num_vehicles=50, num_walkers=20) # Remove traffic generation
 
             # Create hud and initialize pygame for visualization
             if self.activate_render:
@@ -135,7 +130,7 @@ class CarlaRouteEnv(gym.Env):
                 self.display = pygame.display.set_mode((width, height), pygame.HWSURFACE | pygame.DOUBLEBUF)
                 pygame.event.pump()
                 pygame.display.flip()
-			
+
                 self.clock = pygame.time.Clock()
                 self.hud = HUD(width, height)
                 self.hud.set_vehicle(self.vehicle)
@@ -159,22 +154,22 @@ class CarlaRouteEnv(gym.Env):
             if self.activate_lidar:
                 self.lidar = Lidar(self.world, transform=sensor_transforms["lidar"],
                                    attach_to=self.vehicle, on_recv_image=lambda e: self._set_lidar_data(e))
-            
+
             self.obstacle_detector = ObstacleDetector(
                 world=self.world,
                 vehicle=self.vehicle,
                 distance=15.0,  # Detection range (adjust as needed)
                 hit_radius=1.0,  # Sensor width (adjust for sensitivity)
-                on_detect=lambda e: self.on_obstacle_detected(e)  # Callback function
+                on_detect=lambda ttc, obst_type: self.on_obstacle_detected(ttc, obst_type)  # Callback function
             )
-            
+
         except Exception as e:
             self.close()
             raise e
         # Reset env to set initial state
         self.reset()
 
-    def reset(self,seed=None,options=None, is_training=False):
+    def reset(self, seed=None, options=None, is_training=False):
         # Create new route
         self.num_routes_completed = -1
         self.episode_idx += 1
@@ -184,6 +179,7 @@ class CarlaRouteEnv(gym.Env):
         self.terminal_state = False  # Set to True when we want to end episode
         self.success_state = False  # Set to True when we want to end episode.
 
+        self.collision_detected = False
         self.closed = False  # Set to True when ESC is pressed
         self.extra_info = []  # List of extra info shown on the HUD
         self.observation = self.observation_buffer = None  # Last received observation
@@ -204,6 +200,11 @@ class CarlaRouteEnv(gym.Env):
         self.prev_speed = 0
         self.delta_v_accum = 0
         self.last_ttc = 1
+        self.obst_type = ""
+        self.prev_distance_to_goal = self.distance_to_goal
+        #self.traffic_light_state = carla.TrafficLightState.Unknown  # Remove traffic light state
+        #self.following_distance = float('inf')  # Remove following distance
+        #self.other_vehicle_speed = 0.0  # Remove other vehicle speed
 
         # Return initial observation
         time.sleep(0.2)
@@ -231,7 +232,7 @@ class CarlaRouteEnv(gym.Env):
             self.start_wp, self.end_wp = [self.world.map.get_waypoint(spawn.location) for spawn in
                                           spawn_points_list]
             start_location = self.start_wp.transform.location
-            end_location  = self.end_wp.transform.location
+            end_location = self.end_wp.transform.location
             self.distance_to_goal = ((end_location.x - start_location.x)**2 + (end_location.y - start_location.y)**2 + (end_location.z - start_location.z)**2)
             self.route_waypoints = compute_route_waypoints(self.world.map, self.start_wp, self.end_wp, resolution=1.0)
             route_length = len(self.route_waypoints)
@@ -262,9 +263,7 @@ class CarlaRouteEnv(gym.Env):
             return np.array(pygame.surfarray.array3d(self.display), dtype=np.uint8).transpose([1, 0, 2])
         elif mode == "state_pixels":
             return self.observation
-        
 
-        
         # Tick render clock
         self.clock.tick()
         self.hud.tick(self.world, self.clock)
@@ -319,9 +318,6 @@ class CarlaRouteEnv(gym.Env):
         # Render to screen
         pygame.display.flip()
 
-
-
-
     def step(self, action):
         if self.closed:
             raise Exception("CarlaEnv.step() called after the environment was closed." +
@@ -353,8 +349,6 @@ class CarlaRouteEnv(gym.Env):
 
         if self.activate_lidar:
             self.lidar_data = self._get_lidar_data()
-        
-        
 
         # Get vehicle transform
         transform = self.vehicle.get_transform()
@@ -397,6 +391,7 @@ class CarlaRouteEnv(gym.Env):
 
         # Accumulate speed
         self.speed_accum += self.vehicle.get_speed()
+        self.prev_distance_to_goal = self.distance_to_goal
 
         #Delta speed
         current_speed = self.vehicle.get_speed()
@@ -413,10 +408,10 @@ class CarlaRouteEnv(gym.Env):
         # Call external reward fn
         self.last_reward = self.reward_fn(self)
         #print(f"episode: {self.episode_idx} last reward: {self.last_reward}")
-        if np.isinf(self.last_reward) and self.last_reward<0:
-            self.total_reward=0
+        if np.isinf(self.last_reward) and self.last_reward < 0:
+            self.total_reward = 0
         else:
-            self.total_reward+=self.last_reward
+            self.total_reward += self.last_reward
         #print(f"total reward: {self.total_reward}")
 
         # Encode the state
@@ -447,15 +442,10 @@ class CarlaRouteEnv(gym.Env):
             'avg_speed': (self.speed_accum / self.step_count),
             'mean_reward': (self.total_reward / self.step_count)
         }
-        return encoded_state, self.last_reward, self.terminal_state or self.success_state, False,info
+        return encoded_state, self.last_reward, self.terminal_state or self.success_state, False, info
 
     def _draw_path_server(self, life_time=60.0, skip=0):
-        """
-            Draw a connected path from start of route to end.
-            Green node = start
-            Red node   = point along path
-            Blue node  = destination
-        """
+
         for i in range(0, len(self.route_waypoints) - 1, skip + 1):
             z = 30.25
             w0 = self.route_waypoints[i][0]
@@ -475,9 +465,7 @@ class CarlaRouteEnv(gym.Env):
             life_time, False)
 
     def _draw_path(self, camera, image):
-        """
-            Draw a connected path from start of route to end using homography.
-        """
+
         vehicle_vector = vector(self.vehicle.get_transform().location)
         # Get the world to camera matrix
         world_2_camera = np.array(camera.get_transform().get_inverse_matrix())
@@ -494,11 +482,15 @@ class CarlaRouteEnv(gym.Env):
             # Calculate the camera projection matrix to project from 3D -> 2D
             K = build_projection_matrix(image_w, image_h, fov)
             x, y = get_image_point(waypoint_location, K, world_2_camera)
+            #print(f"get_image_point() output: {x},{y} ")
+            #print(f"get_image_point() raw type: {type(x)}, {type(y)}")
             if i == len(self.route_waypoints) - 1:
                 color = (255, 0, 0)
             else:
                 color = (0, 0, 255)
-            image = cv2.circle(image, (int(x), int(y)), radius=3, color=color, thickness=-1)
+            x = int(x)
+            y = int(y)
+            image = cv2.circle(image, (x, y), radius=3, color=color, thickness=-1)
         return image
 
     def _get_observation(self):
@@ -525,6 +517,7 @@ class CarlaRouteEnv(gym.Env):
     def _on_collision(self, event):
         if get_actor_display_name(event.other_actor) != "Road":
             self.terminal_state = True
+            self.collision_detected = True
         if self.activate_render:
             self.hud.notification("Collision with {}".format(get_actor_display_name(event.other_actor)))
 
@@ -543,7 +536,93 @@ class CarlaRouteEnv(gym.Env):
     def _set_lidar_data(self, image):
         self.lidar_data_buffer = image
 
-    def on_obstacle_detected(self, ttc):
+    def attempt_overtake(self):
+        """
+        Checks if overtaking is possible and executes it.
+        """
+        # Get current vehicle location and waypoints
+        current_location = self.vehicle.get_transform().location
+        current_wp = self.world.map.get_waypoint(current_location)
+
+        # Check for a left or right lane
+        left_wp = current_wp.get_left_lane()
+        right_wp = current_wp.get_right_lane()
+
+        # Try to change lane if it's free
+        if left_wp and left_wp.lane_type == carla.LaneType.Driving:
+            #print("Overtaking using left lane...")
+            self.vehicle.apply_control(carla.VehicleControl(throttle=0.5, steer=-0.3))  # Steer left
+            time.sleep(2)  # Wait for lane change
+            self.vehicle.apply_control(carla.VehicleControl(throttle=0.6, steer=0.0))  # Straighten vehicle
+
+        elif right_wp and right_wp.lane_type == carla.LaneType.Driving:
+            #print("Overtaking using right lane...")
+            self.vehicle.apply_control(carla.VehicleControl(throttle=0.5, steer=0.3))  # Steer right
+            time.sleep(2)
+            self.vehicle.apply_control(carla.VehicleControl(throttle=0.6, steer=0.0))
+
+        else:
+            x = 1
+            #print("No available lane to overtake. Maintaining speed.")
+
+    def get_following_distance(self):
+        """
+        Approximates the distance to the vehicle directly in front.
+        This is a simplified calculation and might need refinement.
+        """
+        ego_location = self.vehicle.get_transform().location
+        ego_speed_kmh = self.get_speed(self.vehicle.actor)  # Corrected: Use get_speed()
+        min_distance = float('inf')  # Initialize with a very large number
+        self.other_vehicle_speed = 0.0  # Initialize
+
+        for actor in self.world.world.get_actors().filter('*vehicle*'):  # Iterate through all vehicles
+            if actor.id == self.vehicle.actor.id:  # Skip the ego vehicle itself
+                continue
+
+            other_vehicle_location = actor.get_transform().location
+            other_vehicle_speed_kmh = self.get_speed(actor)  # Corrected: Use get_speed()
+
+            # 1. Check if the other vehicle is ahead (simplified)
+            ego_forward_vector = self.vehicle.get_transform().get_forward_vector()
+            direction_to_other = other_vehicle_location - ego_location
+            dot_product = ego_forward_vector.x * direction_to_other.x + ego_forward_vector.y * direction_to_other.y
+
+            if dot_product > 0:  # Other vehicle is in front (approximately)
+                distance = ego_location.distance(other_vehicle_location)
+                if distance < min_distance:
+                    min_distance = distance
+                    self.other_vehicle_speed = other_vehicle_speed_kmh
+
+        if min_distance == float('inf'):
+            return 1000  # Return a large number if no vehicle is ahead
+        return min_distance
+
+    def get_speed(self, vehicle):
+        """
+        Calculates the speed of a CARLA vehicle in km/h.
+        """
+        velocity = vehicle.get_velocity()
+        speed_kmh = 3.6 * (velocity.x**2 + velocity.y**2 + velocity.z**2)**0.5
+        return speed_kmh
+
+    def get_traffic_light_state(self):
+        """
+        Gets the state of the closest traffic light affecting the vehicle.
+        """
+        traffic_light = self.vehicle.get_traffic_light()
+        if traffic_light is not None:
+            return traffic_light.get_state()
+        return carla.TrafficLightState.Unknown
+
+    def on_obstacle_detected(self, ttc, obst_type):
 
         # Store TTC for use in the environment
-        self.last_ttc = ttc  #Store latest TTC value
+        self.last_ttc = ttc  # Store latest TTC value
+        self.obst_type = obst_type
+        if obst_type == "vehicle":
+            if ttc < 3.0:  # If time to collision is less than 3 seconds
+                #print("Vehicle ahead detected! Slowing down...")
+                self.vehicle.apply_control(carla.VehicleControl(throttle=(self.vehicle.control.throttle/2), steer=0.0))  # Reduce speed
+
+                # Try to change lane
+                self.attempt_overtake()
